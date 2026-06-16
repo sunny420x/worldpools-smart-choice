@@ -1,10 +1,9 @@
-.wp_pool_calculator_page {
+.match_your_pool_page {
     .result_card {
         background-color: #fff;
         border: 1px solid #ddd;
         border-radius: 8px;
         padding: 20px;
-        border-left: 5px solid #007bff;
     }
     .result_card h4 {
         margin: 0;
@@ -69,11 +68,29 @@
     }
 
     #recommended_products #accordion .card .card-header {
-        background: #f9f9f9;
     }
 
     #recommended_products #accordion .card .card-header h2 button {
         font-size: 18px !important;
+    }
+
+    ul.match_your_pool_menu {
+        list-style: none; 
+        margin: 0 0 20px 0; 
+        display: flex;
+        padding: 0;
+    }
+
+    ul.match_your_pool_menu li {
+        padding: 10px 20px;
+        cursor: pointer;
+        background: #f8f8f8;
+        border-top: 1px solid #eee;
+        border-left: 1px solid #eee;
+        border-right: 1px solid #eee;
+    }
+    ul.match_your_pool_menu li.active {
+        background: #fff !important;
     }
 
     @media (max-width: 768px) {

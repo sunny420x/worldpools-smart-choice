@@ -23,6 +23,32 @@ function match_your_pool_enqueue_assets() {
     }
 }
 
+register_activation_hook( __FILE__, 'match_your_pool_plugin_install' );
+
+function match_your_pool_plugin_install() {
+    global $wpdb;
+
+    $myp_products_table = $wpdb->prefix . 'myp_products';
+    $charset_collate = $wpdb->get_charset_collate();
+
+    require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+    
+    // สร้างตาราง myp_products_table
+    $sql_history = "CREATE TABLE $myp_products_table (
+        id bigint(20) NOT NULL AUTO_INCREMENT,
+        title varchar(200),
+        parent_id varchar(200),
+        variant_id varchar(200) NOT NULL,
+        spec varchar(20) NOT NULL,
+        type varchar(20) NOT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        PRIMARY KEY  (id)
+    ) $charset_collate;";
+
+    // รัน dbDelta เพื่ออัปเดต/สร้างตาราง
+    dbDelta( $sql_history );
+}
+
 add_action( 'wp_enqueue_scripts', 'match_your_pool_enqueue_assets' );
 add_action('admin_menu', 'match_your_pool_menu');
 add_action('wp_ajax_match_your_pool_recommend_products', 'match_your_pool_recommend_products');
@@ -44,255 +70,115 @@ function match_your_pool_recommend_products() {
     if ( $flow_rate <= 0 ) {
         wp_send_json_error( 'Flow rate is required.' );
     }
-
-    $results = match_your_pool_get_recommended_products( $flow_rate, $pool_length, $pool_floor_area );
+    
+    $results = match_your_pool_get_recommended_products( $flow_rate, $pool_length, $pool_floor_area, $_POST['mode']);
     wp_send_json_success( $results );
 }
 
-function match_your_pool_get_recommended_products( $minimum_flow_rate, $pool_length = 0, $pool_floor_area = 0 ) {
-    $product_lists = get_option('product_lists', array());
-    // สร้าง Array map เพื่อให้หา type จาก slug ได้รวดเร็ว (ไม่ต้องวนลูปซ้ำ)
-    $slug_to_profile = [];
-    foreach ($product_lists as $p) {
-        $slug_to_profile[$p['name']] = $p;
-    }
+function getProductsByFlowRate( $type, $minimum_flow_rate) {
+    global $wpdb;
+    $products_tables = $wpdb->prefix."myp_products";
+    $data = $wpdb->get_results($wpdb->prepare("SELECT title,type,parent_id,variant_id,spec FROM $products_tables WHERE type = %s AND spec IS NOT NULL AND spec > %d", $type, $minimum_flow_rate));
+    return $data;
+}
+
+function getPumpByFlowrate($minimum_flow_rate) {
+    return getProductsByFlowRate('pump', $minimum_flow_rate);
+}
+
+function getFilterByPumpFlowrate($pump_flowrate) {
+    return getProductsByFlowRate('filter', $pump_flowrate);
+}
+
+function match_your_pool_get_recommended_products($flow_rate, $pool_length, $pool_floor_area, $mode) {
+    $recommended_products = [
+        'pump'   => [],
+        'filter' => []
+    ];
+
+    if($mode == "onlyPump") {
+        $pumps = getPumpByFlowrate($flow_rate);
     
-    $slugs = array_keys($slug_to_profile);
-    if ( empty($slugs) ) return array('pump' => [], 'filter' => [], 'robot' => []);
-
-    $args = array(
-        'post_type'      => 'product',
-        'post_status'    => 'publish',
-        'post_name__in'  => $slugs,
-        'posts_per_page' => -1,
-    );
-
-    $query = new WP_Query( $args );
-    $recommended = array('pump' => array(), 'filter' => array(), 'robot' => array());
-
-    if ( $query->have_posts() ) {
-        while ( $query->have_posts() ) {
-            $query->the_post();
-            $slug = get_post_field( 'post_name', get_the_ID() );
-            $profile = $slug_to_profile[$slug];
-            $type = $profile['type'];
-            $product = wc_get_product( get_the_ID() );
-            $terms   = wp_get_post_terms( get_the_ID(), 'product_cat', array( 'fields' => 'names' ) );
-
-            // Get product content from multiple sources
-            $content = wp_strip_all_tags( get_the_content() );
-            if ( $product ) {
-                $short_desc = $product->get_short_description();
-                if ( ! empty( $short_desc ) ) {
-                    $content .= ' ' . wp_strip_all_tags( $short_desc );
-                }
-                // Also check product meta
-                $product_meta = get_post_meta( get_the_ID() );
-                foreach ( $product_meta as $key => $values ) {
-                    if ( is_array( $values ) && ! empty( $values[0] ) ) {
-                        $content .= ' ' . wp_strip_all_tags( $values[0] );
-                    }
-                }
-                // Check WooCommerce attributes
-                $attributes = $product->get_attributes();
-                if ( ! empty( $attributes ) ) {
-                    foreach ( $attributes as $attribute ) {
-                        if ( is_object( $attribute ) ) {
-                            $options = $attribute->get_options();
-                            if ( ! empty( $options ) ) {
-                                $content .= ' ' . implode( ' ', $options );
-                            }
-                        } elseif ( is_array( $attribute ) ) {
-                            $content .= ' ' . implode( ' ', $attribute );
-                        }
-                    }
-                }
-            }
-
-            $thumbnail = get_the_post_thumbnail_url( get_the_ID(), 'medium' );
-            if ( ! $thumbnail && function_exists( 'wc_placeholder_img_src' ) ) {
-                $thumbnail = wc_placeholder_img_src();
-            }
-
-            $product_data = array(
-                'id'    => get_the_ID(),
-                'name'  => get_the_title(),
-                'link'  => get_permalink(),
-                'price' => $product ? $product->get_price_html() : '',
-                'image' => $thumbnail,
-            );
-
-            // For pump and filter: filter by flowrate (check all parsed values)
-            if ($type === 'filter' ) {
-                $matched_flows = match_your_pool_parse_flow_rate( get_the_ID(), $content, $type );
-
-                if ( !empty( $matched_flows ) ) {
-                    $passes = false;
-                    
-                    // ถ้า $matched_flows มี 2 ค่า (คือ Min, Max จาก product_lists)
-                    if ( count($matched_flows) === 2 && $matched_flows[0] > 0 ) {
-                        // เช็คว่า Flow ที่ต้องการ อยู่ในช่วงที่สินค้าทำได้ไหม
-                        if ( floatval($minimum_flow_rate) <= $matched_flows[1] ) {
-                            $passes = true;
-                        }
-                    } else {
-                        // ถ้าเป็นค่าจาก Regex (Array ของตัวเลข)
-                        foreach ( $matched_flows as $f ) {
-                            if ( floatval( $f ) >= floatval( $minimum_flow_rate ) ) {
-                                $passes = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if ( $passes ) {
-                        $product_data['flow_rate'] = max( $matched_flows ); // แสดงค่าสูงสุดที่สินค้าทำได้
-                        $recommended[ $type ][] = $product_data;
-                    }
-                }
-            }
-            elseif ($type === 'pump' ) {
-                $matched_flows = match_your_pool_parse_flow_rate( get_the_ID(), $content, $type );
-
-                if ( !empty( $matched_flows ) ) {
-                    $passes = false;
-                    
-                    // ถ้า $matched_flows มี 2 ค่า (คือ Min, Max จาก product_lists)
-                    if ( count($matched_flows) === 2 && $matched_flows[0] > 0 ) {
-                        // เช็คว่า Flow ที่ต้องการ อยู่ในช่วงที่สินค้าทำได้ไหม
-                        if ( floatval($minimum_flow_rate) <= $matched_flows[1] ) {
-                            $passes = true;
-                        }
-                    } else {
-                        // ถ้าเป็นค่าจาก Regex (Array ของตัวเลข)
-                        foreach ( $matched_flows as $f ) {
-                            if ( floatval( $f ) >= floatval( $minimum_flow_rate ) ) {
-                                $passes = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if ( $passes ) {
-                        $product_data['flow_rate'] = max( $matched_flows ); // แสดงค่าสูงสุดที่สินค้าทำได้
-                        $recommended[ $type ][] = $product_data;
-                    }
-                }
-            }
-            // For robot: filter by pool size
-            elseif ( $type === 'robot' ) {
-                if ( $pool_length <= 0 ) continue;
-
-                $max_length = isset($profile['max_flow_rate']) ? floatval($profile['max_flow_rate']) : 0;
-
-                if ( $max_length > 0 && $max_length >= floatval( $pool_length ) ) {
-                    $product_data['max_length'] = $max_length;
-                    $recommended[ $type ][] = $product_data;
-                }
+        // Helper to format product data
+        foreach ($pumps as $pump) {
+            $product = wc_get_product($pump->variant_id ?: $pump->parent_id);
+            if ($product) {
+                $recommended_products['pump'][] = [
+                    'title' => $pump->title,
+                    'price' => wc_price($product->get_price()),
+                    'url'   => get_permalink($pump->parent_id),
+                    'image' => wp_get_attachment_url($product->get_image_id()),
+                    'spec'  => $pump->spec,
+                    'parent_id' => $pump->parent_id,
+                    'variant_id' => $pump->variant_id,
+                    'esc_price'=> $product->get_price()
+                ];
             }
         }
-        wp_reset_postdata();
-    }
+    } elseif($mode == "onlyFilter") {
+        $filters = getFilterByPumpFlowrate($flow_rate);
 
-    return $recommended;
-}
-
-function match_your_pool_parse_pool_size( $text ) {
-    $text = str_replace( array( ',', '\r', '\t' ), array( '.', "\n", ' ' ), $text );
-    $clean_text = wp_strip_all_tags( $text );
-    $clean_text = preg_replace( '/[ \f\v]+/', ' ', $clean_text );
-    $clean_text = preg_replace( '/\n+/', "\n", $clean_text );
-
-    // Try patterns: "ความยาวไม่เกิน 15 เมตร" or "สูงสุด 15 เมตร" or "maximum 15m"
-    if ( preg_match( '/(?:ความยาว|สูงสุด|maximum|max|up to)\s*(?:ไม่\s*)?(?:เกิน|\D)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:mเตอร|เมตร|m|meter)/i', $clean_text, $matches ) ) {
-        return floatval( $matches[1] );
-    }
-    if ( preg_match( '/([0-9]+(?:\.[0-9]+)?)\s*(?:mเตอร|เมตร|m|meter)/i', $clean_text, $matches ) ) {
-        return floatval( $matches[1] );
-    }
-    return null;
-}
-
-function match_your_pool_parse_flow_rate( $post_id, $content = '', $type = '' ) {
-    // 1. ดึงข้อมูลจาก option ที่เราเก็บไว้ (Priority 1)
-    $product_lists = get_option('product_lists', array());
-    $slug = get_post_field( 'post_name', $post_id );
+        foreach ($filters as $filter) {
+            $product = wc_get_product($filter->variant_id ?: $filter->parent_id);
+            if ($product) {
+                $recommended_products['filter'][] = [
+                    'title' => $filter->title,
+                    'price' => wc_price($product->get_price()),
+                    'url'   => get_permalink($filter->parent_id),
+                    'image' => wp_get_attachment_url($product->get_image_id()),
+                    'spec'  => $filter->spec,
+                    'parent_id' => $filter->parent_id,
+                    'variant_id' => $filter->variant_id,
+                    'esc_price'=> $product->get_price()
+                ];
+            }
+        }
+    } else {
+        $pumps = getPumpByFlowrate($flow_rate);
+        $filters = getFilterByPumpFlowrate($flow_rate);
     
-    // ค้นหาสินค้าใน $product_lists ด้วย slug
-    foreach ( $product_lists as $profile ) {
-        if ( isset($profile['name']) && $profile['name'] === $slug && isset($profile['type']) && $profile['type'] === $type ) {
-            // คืนค่าแบบเป็น Object หรือ Array ที่ระบุรายละเอียดทั้งหมด
-            return array(
-                'min'  => floatval($profile['min_flow_rate']),
-                'max'  => floatval($profile['max_flow_rate']),
-                'type' => $profile['type'] // ส่ง type กลับไปด้วยเลย
-            );
+        // Helper to format product data
+        foreach ($pumps as $pump) {
+            $product = wc_get_product($pump->variant_id ?: $pump->parent_id);
+            if ($product) {
+                $recommended_products['pump'][] = [
+                    'title' => $pump->title,
+                    'price' => wc_price($product->get_price()),
+                    'url'   => get_permalink($pump->parent_id),
+                    'image' => wp_get_attachment_url($product->get_image_id()),
+                    'spec'  => $pump->spec,
+                    'parent_id' => $pump->parent_id,
+                    'variant_id' => $pump->variant_id,
+                    'esc_price'=> $product->get_price()
+                ];
+            }
+        }
+
+        foreach ($filters as $filter) {
+            $product = wc_get_product($filter->variant_id ?: $filter->parent_id);
+            if ($product) {
+                $recommended_products['filter'][] = [
+                    'title' => $filter->title,
+                    'price' => wc_price($product->get_price()),
+                    'url'   => get_permalink($filter->parent_id),
+                    'image' => wp_get_attachment_url($product->get_image_id()),
+                    'spec'  => $filter->spec,
+                    'parent_id' => $filter->parent_id,
+                    'variant_id' => $filter->variant_id,
+                    'esc_price'=> $product->get_price()
+                ];
+            }
         }
     }
 
-    // 2. ถ้าไม่เจอใน $product_lists ค่อยมาทำ Regex สแกนเนื้อหา (Priority 2)
-    // โค้ด Regex เดิมของคุณเอามาใส่ตรงนี้ได้เลยครับ (ผมตัดมาให้เฉพาะส่วนที่ดึงข้อมูล)
-    $text = wp_strip_all_tags($content);
-    $flows = array();
-
-    // ตัวอย่าง Regex กวาดหาตัวเลข m3/h
-    if ( preg_match_all( '/([0-9]+(?:\.[0-9]+)?)\s*(?:m3|m³)\s*\/\s*h/i', $text, $matches ) ) {
-        foreach ( $matches[1] as $m ) { $flows[] = floatval( $m ); }
-    }
-    
-    // ส่งคืนค่า Array ของ Flow ที่เจอ
-    return !empty($flows) ? $flows : array();
-}
-
-function match_your_pool_classify_product_type( $title, $categories = array() ) {
-    $combined = strtolower( $title . ' ' . implode( ' ', $categories ) );
-
-    if ( preg_match( '/pump|ปั้ม|ปั๊ม|pump\b/i', $combined ) ) {
-        return 'pump';
-    }
-    if ( preg_match( '/filter|ถังกรอง|ชุดถังกรองทรายและปั๊ม|ถังกรองทราย|sand|filter\b/i', $combined ) ) {
-        return 'filter';
-        $total_checked = 0;
-        $sample_non_matches = array();
-        $sample_matches = array();
-
-    }
-    if ( preg_match( '/robot|cleaner|หุ่นยนต์|robot\b|cleaner\b/i', $combined ) ) {
-        return 'robot';
-    }
-    return null;
-}
-
-add_action( 'wp_ajax_get_variants_by_id', 'fetch_variants_by_id' );
-add_action( 'wp_ajax_nopriv_get_variants_by_id', 'fetch_variants_by_id' );
-
-function fetch_variants_by_id() {
-    $product_id = isset($_POST['product_id']) ? absint( $_POST['product_id'] ) : 0;
-
-    if ( ! $product_id ) {
-        wp_send_json_error( 'Invalid or missing Product ID.' );
-    }
-
-    $product = wc_get_product( $product_id );
-
-    if ( ! $product ) {
-        wp_send_json_error( 'Product not found.' );
-    }
-
-    if ( ! $product->is_type( 'variable' ) ) {
-        wp_send_json_error( 'Product is not variable.' );
-    }
-
-    $variations = $product->get_available_variations();
-    
-    wp_send_json_success( $variations ); 
+    return $recommended_products;
 }
 
 add_action( 'wp_ajax_custom_add_to_cart', 'match_your_pool_ajax_add_to_cart' );
 add_action( 'wp_ajax_nopriv_custom_add_to_cart', 'match_your_pool_ajax_add_to_cart' );
 
 function match_your_pool_ajax_add_to_cart() {
-    $product_id   = isset($_POST['product_id']) ? absint( wp_unslash( $_POST['product_id'] ) ) : 0; 
+    $product_id   = isset($_POST['parent_id']) ? absint( wp_unslash( $_POST['parent_id'] ) ) : 0; 
     $variation_id = isset($_POST['variation_id']) ? absint( wp_unslash( $_POST['variation_id'] ) ) : 0; 
     $quantity     = isset($_POST['quantity']) ? absint( wp_unslash( $_POST['quantity'] ) ) : 1;     
 
@@ -331,6 +217,20 @@ function match_your_pool_ajax_add_to_cart() {
     }
 
     wp_send_json_error( 'ไม่สามารถเพิ่มสินค้าลงตะกร้าได้ (สินค้าอาจหมด หรือติดเงื่อนไข)' );
+}
+
+add_action('wp_ajax_custom_add_to_cart_single', 'custom_add_to_cart_single');
+add_action('wp_ajax_nopriv_custom_add_to_cart_single', 'custom_add_to_cart_single');
+
+function custom_add_to_cart_single() {
+    $parent_id = intval($_POST['parent_id']);
+    $variation_id = intval($_POST['variation_id']);
+
+    if (WC()->cart->add_to_cart($parent_id, 1, $variation_id)) {
+        wp_send_json_success('Added');
+    } else {
+        wp_send_json_error('Failed');
+    }
 }
 
 function match_your_pool_menu() {
@@ -415,6 +315,53 @@ function match_your_pool_settings_page() {
         .white-label-zone h1,p {
             padding: 0 20px;
         }
+        .container {
+            background: #fff; 
+            width: 1200px;
+        }
+        .container h1 {
+            display: block;
+            font-size: 18px;
+            padding: 13px 20px;
+            margin: 0 0 20px 0;
+            background: #555;
+            color: #fff;
+        }
+        .container p {
+            padding: 10px 0;
+            margin: 0;
+        }
+        .leftside {
+            width: 350px;
+            background: #f8f8f8;
+            height: max-content;
+        }
+        .leftside h1 {
+            background: #009FE3;
+            color: #fff;
+            font-size: 16px;
+            padding: 10px 20px;
+            margin: 0;
+        }
+        .leftside a {
+            padding: 10px 20px;
+            font-size: 14px;
+            background: #f8f8f8;
+            color: #000;
+            transition: .2s ease-in-out;
+            display: block;
+            width: 100%;
+            text-decoration: none;
+        }
+        .leftside a:hover {
+            background: #fff;
+            cursor: pointer;
+        }
+        @media print {
+            .no-print {
+                display: none !important;
+            }
+        }
     </style>
     <div class="white-label-zone no-print">
         <span style="padding: 60px 10px 60px 40px;float: left;font-size: 60px;">📦</span>
@@ -427,76 +374,161 @@ function match_your_pool_settings_page() {
         </div>
     </div>
     <div class="wrap">
-        <div style="padding: 25px 25px 25px 25px;">
-            ตัวกรอง (Filter) : 
-            <select name="" id="" onchange="window.location.href='admin.php?page=pool-calculator-settings&type='+this.value">
-                <option value="">เลือกประเภทสินค้า</option>
+        <div style="display: flex;">
+            <div class="leftside">
+                <h1>World Pools Smart Choice</h1>
+                <a href="admin.php?page=pool-calculator-settings&option=products" style="width: 100%;">สินค้า</a>
+            </div>
+            <div class="container">
                 <?php
-                $profiles = get_option('product_lists', array());
-                $types = [];
-                foreach ($profiles as $profile) {
-                    $selected = (isset($_GET['type']) && $_GET['type'] === $profile['type']) ? 'selected' : '';
-                    if(in_array($profile['type'], $types)) {
-                        continue;
-                    }
+                if(isset($_GET['option']) && $_GET['option'] == "products") {
                 ?>
-                <option value="<?= esc_attr($profile['type']) ?>" <?= $selected ?>><?= esc_html(ucfirst($profile['type'])) ?></option>
-                <?php
-                    $types[] = $profile['type'];
-                }
-                ?>
-            </select>
-            <table class="wp-list-table widefat fixed striped">
-                <thead>
-                    <th>#</th>
-                    <th>รายการ</th>
-                    <th>ประเภท</th>
-                    <th>Min</th>
-                    <th>Max</th>
-                    <th>จัดการ</th>
-                </thead>
-                <tbody>
+                <div style="padding: 25px 25px 25px 25px;">
                     <?php
-                        $replace_list = get_option('product_lists', array());
-
-                        if(isset($_GET['type']) && !empty($_GET['type'])) {
-                            $selected_type = sanitize_text_field($_GET['type']);
-                            $replace_list = array_filter(get_option('product_lists', array()), function($profile) use ($selected_type) {
-                                return isset($profile['type']) && $profile['type'] === $selected_type;
-                            });
-                        }
-                        
-                        foreach($replace_list as $row) {
-                        ?>
-                        <form action="" method="post">
+                    global $wpdb;
+                    $products_table = $wpdb->prefix."myp_products";
+                    $products = $wpdb->get_results("SELECT id, parent_id, variant_id, title, spec FROM $products_table ORDER BY id ASC");
+                    ?>
+                    <table class="wp-list-table widefat fixed striped">
+                        <thead>
+                            <th>Parant</th>
+                            <th>Variant</th>
+                            <th>ชื่อสินค้า</th>
+                            <th>สเปค</th>
+                            <th>จัดการ</th>
+                        </thead>
+                        <tbody>
+                            <?php foreach($products as $row) { ?>
                             <tr>
-                                <input type="hidden" name="id" value="<?=$row['id']?>">
-                                <td><?=$row['id']?></td>
-                                <td><input type="text" value="<?=$row['name']?>" name="name" style="width: 100%;"></td>
-                                <td><input type="text" value="<?=$row['type']?>" name="type" style="width: 100%;"></td>
-                                <td><input type="text" value="<?=$row['min_flow_rate']?>" name="min_flow_rate" style="width: 100%;"></td>
-                                <td><input type="text" value="<?=$row['max_flow_rate']?>" name="max_flow_rate" style="width: 100%;"></td>
+                                <td><?=$row->parent_id?></td>
+                                <td><?=$row->variant_id?></td>
+                                <td><?=$row->title?></td>
+                                <td><?=$row->spec?></td>
                                 <td>
-                                    <button class="button" name="saveProfile" type="submit">บันทึกการเปลี่ยนแปลง</button>
-                                    <button class="button button-primary" name="deleteProfile" type="submit">ลบ</button>
+                                    <button onclick="window.location.href='admin.php?page=pool-calculator-settings&option=edit_products&id=<?=$row->id?>'" class="button">จัดการ</button>
+                                    <button onclick="window.location.href='admin.php?page=pool-calculator-settings&option=delete_products&id=<?=$row->id?>'" class="button">ลบ</button>
                                 </td>
                             </tr>
-                        </form>
+                            <?php
+                            }
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php
+                } elseif(isset($_GET['option']) && $_GET['option'] == "edit_products" && isset($_GET['id'])) {
+                    global $wpdb;
+                    $products_table = $wpdb->prefix."myp_products";
+
+                    if(isset($_POST['editProduct'])) {
+                        $id = sanitize_text_field( $_GET['id'] );
+                        $title = sanitize_text_field( $_POST['title'] );
+                        $parent_id = sanitize_text_field( $_POST['parent_id'] );
+                        $variant_id = sanitize_text_field( $_POST['variant_id'] );
+                        $spec = sanitize_text_field( $_POST['spec'] );
+                        $wpdb->query($wpdb->prepare("UPDATE $products_table SET title = %s, parent_id = %s, variant_id = %s, spec = %s WHERE id = %d", $title, $parent_id, $variant_id, $spec, $id));
+                        wp_redirect( admin_url('admin.php?page=pool-calculator-settings&option=edit_products&id='.$id.'&success') );
+                        exit;
+                    }
+
+                    $product_id = sanitize_text_field( $_GET['id'] );
+                    $product = $wpdb->get_row($wpdb->prepare("SELECT id, parent_id, variant_id, title, spec FROM $products_table WHERE id = %d", $product_id));
+                ?>
+                <div style="padding: 25px 25px 25px 25px;">
+                    <form action="" method="post">
+                        <label for="title">ชื่อสินค้า:</label><br>
+                        <input type="text" name="title" id="title" value="<?=$product->title?>" style="width: 100%;">
+                        <br>
+                        <label for="parent_id">parent_id:</label><br>
+                        <input type="text" name="parent_id" id="parent_id" value="<?=$product->parent_id?>" style="width: 100%;">
+                        <br>
+                        <label for="variant_id">variant_id:</label><br>
+                        <input type="text" name="variant_id" id="variant_id" value="<?=$product->variant_id?>" style="width: 100%;">
+                        <br>
+                        <label for="spec">Spec:</label><br>
+                        <input type="text" name="spec" id="spec" value="<?=$product->spec?>" style="width: 100%;">
+                        <br><br>
+                        <input type="submit" name="editProduct" class="button" value="บันทึกการเปลี่ยนแปลง">
+                    </form>
+                </div>
+                <?php
+                } else {
+                ?>
+                <div style="padding: 25px 25px 25px 25px;">
+                    ตัวกรอง (Filter) : 
+                    <select name="" id="" onchange="window.location.href='admin.php?page=pool-calculator-settings&type='+this.value">
+                        <option value="">เลือกประเภทสินค้า</option>
                         <?php
+                        $profiles = get_option('product_lists', array());
+                        $types = [];
+                        foreach ($profiles as $profile) {
+                            $selected = (isset($_GET['type']) && $_GET['type'] === $profile['type']) ? 'selected' : '';
+                            if(in_array($profile['type'], $types)) {
+                                continue;
+                            }
+                        ?>
+                        <option value="<?= esc_attr($profile['type']) ?>" <?= $selected ?>><?= esc_html(ucfirst($profile['type'])) ?></option>
+                        <?php
+                            $types[] = $profile['type'];
                         }
                         ?>
-                        <form action="" method="post">
-                            <tr>
-                                <td></td>
-                                <td><input type="text" name="name" style="width: 100%;"></td>
-                                <td><input type="text" name="type" style="width: 100%;"></td>
-                                <td><input type="text" name="min_flow_rate" style="width: 100%;"></td>
-                                <td><input type="text" name="max_flow_rate" style="width: 100%;"></td>
-                                <td><button class="button" name="newProfile" type="submit">เพิ่มโปรไฟล์ใหม่</button></td>
-                            </tr>
-                        </form>
-                </tbody>
-            </table>
+                    </select>
+                    <table class="wp-list-table widefat fixed striped">
+                        <thead>
+                            <th>#</th>
+                            <th>รายการ</th>
+                            <th>ประเภท</th>
+                            <th>Min</th>
+                            <th>Max</th>
+                            <th>จัดการ</th>
+                        </thead>
+                        <tbody>
+                            <?php
+                                $replace_list = get_option('product_lists', array());
+        
+                                if(isset($_GET['type']) && !empty($_GET['type'])) {
+                                    $selected_type = sanitize_text_field($_GET['type']);
+                                    $replace_list = array_filter(get_option('product_lists', array()), function($profile) use ($selected_type) {
+                                        return isset($profile['type']) && $profile['type'] === $selected_type;
+                                    });
+                                }
+                                
+                                foreach($replace_list as $row) {
+                                ?>
+                                <form action="" method="post">
+                                    <tr>
+                                        <input type="hidden" name="id" value="<?=$row['id']?>">
+                                        <td><?=$row['id']?></td>
+                                        <td><input type="text" value="<?=$row['name']?>" name="name" style="width: 100%;"></td>
+                                        <td><input type="text" value="<?=$row['type']?>" name="type" style="width: 100%;"></td>
+                                        <td><input type="text" value="<?=$row['min_flow_rate']?>" name="min_flow_rate" style="width: 100%;"></td>
+                                        <td><input type="text" value="<?=$row['max_flow_rate']?>" name="max_flow_rate" style="width: 100%;"></td>
+                                        <td>
+                                            <button class="button" name="saveProfile" type="submit">บันทึกการเปลี่ยนแปลง</button>
+                                            <button class="button button-primary" name="deleteProfile" type="submit">ลบ</button>
+                                        </td>
+                                    </tr>
+                                </form>
+                                <?php
+                                }
+                                ?>
+                                <form action="" method="post">
+                                    <tr>
+                                        <td></td>
+                                        <td><input type="text" name="name" style="width: 100%;"></td>
+                                        <td><input type="text" name="type" style="width: 100%;"></td>
+                                        <td><input type="text" name="min_flow_rate" style="width: 100%;"></td>
+                                        <td><input type="text" name="max_flow_rate" style="width: 100%;"></td>
+                                        <td><button class="button" name="newProfile" type="submit">เพิ่มโปรไฟล์ใหม่</button></td>
+                                    </tr>
+                                </form>
+                        </tbody>
+                    </table>
+                </div>
+                <?php
+                }
+                ?>
+            </div>
         </div>
     </div>
     <?php
@@ -505,125 +537,164 @@ function match_your_pool_settings_page() {
 function match_your_pool_page() {
 ?>
 <div class="match_your_pool_page">
-    <h2>✅ World Pools Smart Choice | ตัวช่วยเลือกอุปกรณ์สระว่ายน้ำ</h2>
-    <hr>
-    <div class="row">
-        <div class="col-lg-8">
-            <h3 style="margin-top: 0;">📏 ขนาดของสระน้ำ</h3>
-            <div class="row">
-                <div class="col-lg">
-                    <label for="width">ความกว้าง (เมตร):</label>
-                    <input type="number" id="width" value="4" oninput="calculateVolume()" class="form-control">   
+    <h2>✅ Match Your Pool | ตัวช่วยเลือกอุปกรณ์สระว่ายน้ำ</h2>
+    <ul class="match_your_pool_menu">
+        <li id="pool_match_link" onclick="menuNavigation('pool_match')">Pool Match แนะนำตามขนาดสระน้ำ</li>
+        <li id="flow_match_link" onclick="menuNavigation('flow_match')">Flow Match แนะนำสินค้าตาม Flow Rate ที่ต้องการ</li>
+    </ul>
+    <div id="pool_match_page">
+        <div class="row">
+            <div class="col-lg-8">
+                <h3 style="margin-top: 0;">Pool Match แนะนำตามขนาดสระน้ำ</h3>
+                <div class="row">
+                    <div class="col-lg">
+                        <label for="width">ความกว้าง (เมตร):</label>
+                        <input type="number" id="width" value="4" oninput="calculateVolume()" class="form-control">   
+                    </div>
+                    <div class="col-lg">
+                        <label for="length">ความยาว (เมตร):</label>
+                        <input type="number" id="length" value="8" oninput="calculateVolume()" class="form-control">   
+                    </div>
+                    <div class="col-lg">
+                        <label for="depth">ความลึกตื้น (เมตร):</label>
+                        <input type="number" id="depth_start" value="1" oninput="calculateVolume()" class="form-control">
+                    </div>
+                    <div class="col-lg">
+                        <label for="depth">ความลึกลึก (เมตร):</label>
+                        <input type="number" id="depth_end" value="2" oninput="calculateVolume()" class="form-control">
+                    </div>
+                    <div class="col-lg">
+                        <label for="depth">รูปแบบสระ:</label>
+                        <select id="pool_shape" class="form-control" onchange="calculateVolume()">
+                            <option value="rectangular">สระรูปสี่เหลี่ยม</option>
+                            <option value="lshape">สระ L-Shape</option>
+                            <option value="oval">สระรูปวงรี</option>
+                            <option value="kidney">สระรูปไต</option>
+                        </select>
+                    </div>
                 </div>
-                <div class="col-lg">
-                    <label for="length">ความยาว (เมตร):</label>
-                    <input type="number" id="length" value="8" oninput="calculateVolume()" class="form-control">   
-                </div>
-                <div class="col-lg">
-                    <label for="depth">ความลึกตื้น (เมตร):</label>
-                    <input type="number" id="depth_start" value="1" oninput="calculateVolume()" class="form-control">
-                </div>
-                <div class="col-lg">
-                    <label for="depth">ความลึกลึก (เมตร):</label>
-                    <input type="number" id="depth_end" value="2" oninput="calculateVolume()" class="form-control">
-                </div>
-                <div class="col-lg">
-                    <label for="depth">รูปแบบสระ:</label>
-                    <select id="pool_shape" class="form-control" onchange="calculateVolume()">
-                        <option value="rectangular">สระรูปสี่เหลี่ยม</option>
-                        <option value="lshape">สระ L-Shape</option>
-                        <option value="oval">สระรูปวงรี</option>
-                        <option value="kidney">สระรูปไต</option>
-                    </select>
+            </div>
+            <div class="col-lg-4">
+                <h3>🕓 Turnover Time</h3>
+                <div class="row turnover-btn-group">
+                    <div class="col-lg">
+                        <button onclick="setTurnover(4)" class="turnover-btn" id="turnover-4">4 ชั่วโมง/รอบ</button>
+                    </div>
+                    <div class="col-lg">
+                        <button onclick="setTurnover(6)" class="turnover-btn" id="turnover-6">6 ชั่วโมง/รอบ</button>
+                    </div>
+                    <div class="col-lg">
+                        <button onclick="setTurnover(8)" class="turnover-btn" id="turnover-8">8 ชั่วโมง/รอบ</button>
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="col-lg-4">
-            <h3>🕓 Turnover Time</h3>
-            <div class="row turnover-btn-group">
-                <div class="col-lg">
-                    <button onclick="setTurnover(4)" class="turnover-btn" id="turnover-4">4 ชั่วโมง/รอบ</button>
-                </div>
-                <div class="col-lg">
-                    <button onclick="setTurnover(6)" class="turnover-btn" id="turnover-6">6 ชั่วโมง/รอบ</button>
-                </div>
-                <div class="col-lg">
-                    <button onclick="setTurnover(8)" class="turnover-btn" id="turnover-8">8 ชั่วโมง/รอบ</button>
-                </div>
+        <div class="row" id="pool_spec">
+            <div class="col-lg result_card">
+                <h4>💦 ปริมาตรสระน้ำ (Volume)</h4>
+                <div id="pool_volume" style="margin-top: 20px; font-size: 18px;"></div>
+            </div>
+            <div class="col-lg result_card">
+                <h4>🧱 พื้นที่พื้นสระ (Floor Area)</h4>
+                <div id="pool_floor" style="margin-top: 20px; font-size: 18px;"></div>
+            </div>
+            <div class="col-lg result_card">
+                <h4>💧 อัตราการไหลของน้ำ (Flow Rate)</h4>
+                <div id="pool_flowrate" style="margin-top: 20px; font-size: 18px;"></div>
+            </div>
+        </div>
+        <div class="row" id="recommended_products_specifications"> 
+            <div class="col-lg result_card">
+                <h4>🚀 Flow Rate ของปั้มที่ต้องการ</h4>
+                <p style="font-size: 18px; margin-top: 20px;"> ≥ <span id="recommended_pool_pump_flowrate"></span></p>
+            </div>
+            <div class="col-lg result_card">
+                <h4>🛢️ Flow Rate ของถังกรองที่ต้องการ</h4>
+                <p style="font-size: 18px; margin-top: 20px;"> ≥ <span id="recommended_pool_filter_flowrate"></span></p>
+            </div>
+            <div class="col-lg result_card">
+                <h4>🤖 หุ่นยนต์ทำความสะอาดสระ</h4>
+                <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_pool_robot_cleaner"></span></p>
             </div>
         </div>
     </div>
 
-    <div class="row" id="pool_spec">
-        <div class="col-lg result_card">
-            <h4>💦 ปริมาตรสระน้ำ (Volume)</h4>
-            <div id="pool_volume" style="margin-top: 20px; font-size: 18px;"></div>
-        </div>
-        <div class="col-lg result_card">
-            <h4>🧱 พื้นที่พื้นสระ (Floor Area)</h4>
-            <div id="pool_floor" style="margin-top: 20px; font-size: 18px;"></div>
-        </div>
-        <div class="col-lg result_card">
-            <h4>💧 อัตราการไหลของน้ำ (Flow Rate)</h4>
-            <div id="pool_flowrate" style="margin-top: 20px; font-size: 18px;"></div>
-        </div>
-    </div>
-    <div class="row" id="recommended_products_specifications"> 
-        <div class="col-lg result_card">
-            <h4>🚀 Flow Rate ของปั้มที่ต้องการ</h4>
-            <p style="font-size: 18px; margin-top: 20px;"> ≥ <span id="recommended_pool_pump_flowrate"></span></p>
-        </div>
-        <div class="col-lg result_card">
-            <h4>🛢️ Flow Rate ของถังกรองที่ต้องการ</h4>
-            <p style="font-size: 18px; margin-top: 20px;"> ≥ <span id="recommended_pool_filter_flowrate"></span></p>
-        </div>
-        <div class="col-lg result_card">
-            <h4>🤖 หุ่นยนต์ทำความสะอาดสระ</h4>
-            <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_pool_robot_cleaner"></span></p>
+    <div id="flow_match_page">
+        <script>
+            let searchByAttributesFilter = "onlyPump";
+
+            function setSearchByAttributesFilter(val) {
+                searchByAttributesFilter = val;
+                if(val == "onlyPump") {
+                    document.getElementById('filterProducts').style.display = "none";
+                    document.getElementById('pumpProducts').style.display = "block";
+                }
+                if(val == "onlyFilter") {
+                    document.getElementById('filterProducts').style.display = "block";
+                    document.getElementById('pumpProducts').style.display = "none";
+                }
+                if(val == "all") {
+                    document.getElementById('filterProducts').style.display = "block";
+                    document.getElementById('pumpProducts').style.display = "block";
+                }
+            }
+        </script>
+        <div class="row" style="gap: 10px;">
+            <div class="col-auto">
+                กรอกจำนวน Flow Rate ที่ต้องการ: <input type="text" id="search_by_flowrate" oninput="searchByAttributes(this.value, 0, 0, searchByAttributesFilter)" value="8"> m³/h
+            </div>
+            <div class="col-auto">
+                <select name="" id="" onchange="setSearchByAttributesFilter(this.value)">
+                    <option value="all">ทั้งหมด</option>
+                    <option value="onlyPump">เฉพาะปั๊มสระว่ายน้ำ</option>
+                    <option value="onlyFilter">เฉพาะถังกรอง</option>
+                </select>
+            </div>
         </div>
     </div>
 
     <div id="recommended_products">
-        <h2>🛍️ สินค้าที่แนะนำ</h2>
         <div id="accordion">
-            <div class="card">
-                <div class="card-header" id="headingOne">
-                <h2 class="mb-0">
-                    <button class="btn btn-link" onclick="backto('pump')">
-                        <span id="pool_pump_status"></span>ปั๊มสระว่ายน้ำ (Pool Pumps)
-                    </button>
-                </h2>
+            <div class="row">
+                <div class="card col-lg" id="pumpProducts">
+                    <div class="card-header" id="headingOne">
+                    <h2 class="mb-0">
+                        <button class="btn btn-link">
+                            <span id="pool_pump_status">💡 ปั๊มสระว่ายน้ำ (Pool Pumps) <span id="current_required_flowrate"></span></span>
+                        </button>
+                    </h2>
+                    </div>
+                    <div id="collapse_pool_pump_list" class="collapse show" aria-labelledby="headingOne" data-parent="#accordion">
+                        <div class="card-body">
+                            <div style="display: flex">
+                                <div id="recommended_pool_pump_list"></div>
+                                <div id="pumpVariations"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div id="collapse_pool_pump_list" class="collapse show" aria-labelledby="headingOne" data-parent="#accordion">
-                    <div class="card-body">
-                        <div style="display: flex">
-                            <div id="recommended_pool_pump_list"></div>
-                            <div id="pumpVariations"></div>
+                <div class="card col-lg" id="filterProducts">
+                    <div class="card-header" id="headingOne">
+                    <h2 class="mb-0">
+                        <button class="btn btn-link">
+                            <span id="pool_filter_status">💡 ถังกรองสระว่ายน้ำ (Pool Filters) <span id="current_pump_flowrate"></span></span>
+                        </button>
+                    </h2>
+                    </div>
+                    <div id="collapse_pool_filter_list" class="collapse show" aria-labelledby="headingOne" data-parent="#accordion">
+                        <div class="card-body">
+                            <div style="display: flex">
+                                <div id="recommended_pool_filter_list"></div>
+                                <div id="filterVariations"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-            <div class="card">
-                <div class="card-header" id="headingOne" onclick="backto('filter')">
+            <!-- <div class="card">
+                <div class="card-header" id="headingOne">
                 <h2 class="mb-0">
                     <button class="btn btn-link">
-                        <span id="pool_filter_status"></span>ถังกรองสระว่ายน้ำ (Pool Filters)
-                    </button>
-                </h2>
-                </div>
-                <div id="collapse_pool_filter_list" class="collapse" aria-labelledby="headingOne" data-parent="#accordion">
-                    <div class="card-body">
-                        <div style="display: flex">
-                            <div id="recommended_pool_filter_list"></div>
-                            <div id="filterVariations"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="card">
-                <div class="card-header" id="headingOne">
-                <h2 class="mb-0">
-                    <button class="btn btn-link" onclick="backto('robot')">
                         <span id="pool_robot_status"></span>หุ่นยนต์ทำความสะอาดสระ (Pool Robot Cleaners)
                     </button>
                 </h2>
@@ -636,10 +707,24 @@ function match_your_pool_page() {
                         </div>
                     </div>
                 </div>
-            </div>
+            </div> -->
         </div>
     </div>
+    <table class="table">
+        <thead>
+            <th>รายการ</th>
+            <th>ประเภท</th>
+            <th>สเปค</th>
+            <th>ราคา</th>
+            <th>จัดการ</th>
+        </thead>
+        <tbody id="virtualCartTable">
 
+        </tbody>
+    </table>
+    <h4><span id="virtualCartSummery"></span> <button class="btn btn-primary" onclick="addMultipleToCart()">เพิ่มลงในตะกร้า</button></h4>
+
+    <h2>🧰 Maintaining</h2>
     <div class="row" id="recommended_chemicals">
         <div class="col-lg result_card">
             <h4>🧪 คลอรีน 90%</h4>
@@ -656,6 +741,7 @@ function match_your_pool_page() {
     </div>
 
     <script>
+        //----- Pool Match System -----
         const wpPoolCalculatorAjaxUrl = '<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>';
         const wpPoolCalculatorNonce = '<?php echo esc_js( wp_create_nonce( 'match_your_pool_recommend' ) ); ?>';
 
@@ -666,22 +752,23 @@ function match_your_pool_page() {
         let turnover = 6;
         let pool_shape = 'rectangular';
 
-        let selectedPump = null;
-        let selectedFilter = null;
-        let selectedRobotCleaner = null;
-        let summery = 0;
+        let pumpSelected = false;
+        let filterSelected = false;
+
+        let virtual_cart = [];
 
         document.getElementById('pool_spec').style.display = 'none';
-        document.getElementById('recommended_products_specifications').style.display = 'none'; // ซ่อนส่วนแนะนำสินค้าตั้งแต่เริ่มต้น
-        document.getElementById('recommended_products').style.display = 'none'; // ซ่อนส่วนแนะนำสินค้าตั้งแต่เริ่มต้น
-        document.getElementById('recommended_chemicals').style.display = 'none'; // ซ่อนส่วนแนะนำสินค้าตั้งแต่เริ่มต้น
+        document.getElementById('recommended_products_specifications').style.display = 'none';
+        document.getElementById('recommended_products').style.display = 'none';
+        document.getElementById('recommended_chemicals').style.display = 'none';
 
-        async function fetchRecommendedProducts(flowRate, poolLength, poolFloorArea) {
+        async function fetchRecommendedProducts(flowRate, poolLength, poolFloorArea, mode) {
             const formData = new FormData();
             formData.append('action', 'match_your_pool_recommend_products');
             formData.append('flow_rate', flowRate);
             formData.append('pool_length', poolLength);
             formData.append('pool_floor_area', poolFloorArea);
+            formData.append('mode', mode);
             formData.append('security', wpPoolCalculatorNonce);
 
             const response = await fetch(wpPoolCalculatorAjaxUrl, {
@@ -699,31 +786,35 @@ function match_your_pool_page() {
             if (!container) {
                 return;
             }
-            if (!items || items.length === 0) {
-                container.innerHTML = '<p>ไม่พบสินค้าที่ตรงตามเกณฑ์</p>';
+
+            if (!items || items.length == 0) {
                 return;
             }
+
             container.innerHTML = items.map(item => {
-                const imageHtml = item.image ? `<div class="recommended_image"><a href="${item.link}" target="_blank" rel="noopener noreferrer"><img src="${item.image}" alt="${item.name}" loading="lazy"></a></div>` : '';
-                const metaText = type == "robot" ? `เหมาสำหรับสระน้ำ: ${item.max_length} m` : `FlowRate: ${item.flow_rate} m³/h`;
+                const imageHtml = item.image ? `<div class="recommended_image"><a href="${item.link}" target="_blank" rel="noopener noreferrer"><img src="${item.image}" alt="${item.title}" loading="lazy"></a></div>` : '';
+                const metaText = type == "robot" ? `เหมาสำหรับสระน้ำ: ${item.max_length} m` : `FlowRate: ${item.spec} m³/h`;
                 return `
                 <div class="recommended_item">
                     ${imageHtml}
                 <div class="recommended_content">
-                    <a href="${item.link}" target="_blank" rel="noopener noreferrer" class="recommended_title">${item.name}</a>
+                    <a href="${item.link}" target="_blank" rel="noopener noreferrer" class="recommended_title">${item.title}</a>
                     <div class="recommended_meta">${metaText} <br>ราคา: ${item.price || ''}</div>
-                    <button class="select_product_btn btn btn-outline-primary" onclick="selectProductToGetVariation('${item.id}', '${type}');" style="margin: 10px 0;">เพิ่มลงในตะกร้า</button>
+                    <button class="select_product_btn btn btn-primary" onclick="addToVirtualCart('${item.title}','${item.parent_id}', '${item.variant_id}', '${type}', '${item.spec}', '${item.esc_price}');" style="margin: 10px 0;">เลือก</button>
                     </div>
                 </div>`;
             }).join('');
         }
 
         async function calculateVolume() {
-            width = parseFloat(document.getElementById('width').value);
-            length = parseFloat(document.getElementById('length').value);
-            depth_start = parseFloat(document.getElementById('depth_start').value);
-            depth_end = parseFloat(document.getElementById('depth_end').value);
-            pool_shape = document.getElementById('pool_shape').value;
+            let width = parseFloat(document.getElementById('width').value);
+            let length = parseFloat(document.getElementById('length').value);
+            let depth_start = parseFloat(document.getElementById('depth_start').value);
+            let depth_end = parseFloat(document.getElementById('depth_end').value);
+            let pool_shape = document.getElementById('pool_shape').value;
+            let mode = 'all';
+            
+            pumpSelected = false;
 
             if (isNaN(width) || isNaN(length) || isNaN(depth_start) || isNaN(depth_end)) {
                 document.getElementById('pool_volume').innerText = 'กรุณากรอกตัวเลขที่ถูกต้อง';
@@ -773,7 +864,17 @@ function match_your_pool_page() {
             document.getElementById('recommended_products').style.display = 'block';
             document.getElementById('recommended_chemicals').style.display = 'flex';
 
-            const result = await fetchRecommendedProducts(flowRate, length, floorArea);
+            document.getElementById('current_required_flowrate').innerHTML = "สำหรับสระน้ำที่ต้องการ Flow Rate ≥ "+flowRate.toFixed(2)+" m³/h";
+
+            if(pumpSelected) {
+                mode = 'onlyFilter'
+            }
+            
+            await searchByAttributes(flowRate, length, floorArea, mode);
+        }
+
+        async function searchByAttributes(flowRate, length, floorArea, mode) {
+            const result = await fetchRecommendedProducts(flowRate, length, floorArea, mode);
             if ( result && result.success && result.data ) {
                 renderProductList('recommended_pool_pump_list', result.data.pump, 'pump');
                 renderProductList('recommended_pool_filter_list', result.data.filter, 'filter');
@@ -805,103 +906,7 @@ function match_your_pool_page() {
             calculateVolume();
         }
 
-        function selectProductToGetVariation(id, type) {
-            const collapse_pool_pump_list = document.getElementById('collapse_pool_pump_list');
-            const collapse_pool_filter_list = document.getElementById('collapse_pool_filter_list');
-            const collapse_pool_robot_cleaner_list = document.getElementById('collapse_pool_robot_cleaner_list');
-
-            const pumpVariations = document.getElementById('pumpVariations');
-            const filterVariations = document.getElementById('filterVariations');
-            const robotVariations = document.getElementById('robotVariations');
-
-            const params = new URLSearchParams();
-            params.append('action', 'get_variants_by_id');
-            params.append('product_id', id);
-
-            fetch("/wp-admin/admin-ajax.php", {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: params
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json(); // Parse JSON response from WordPress
-            })
-            .then(result => {
-                if (result.success) {
-                    console.log('Variations data:', result.data);
-                    
-                    if(type == "pump") {
-                        document.getElementById('recommended_pool_pump_list').classList.remove('full');
-                        pumpVariations.classList.add('active');
-                        
-                        pumpVariations.innerHTML = "";
-                        result.data.forEach(data => {                            
-                            pumpVariations.innerHTML += `
-                            <div style="display: flex;">
-                                <img src="${data.image.full_src}" width="150" alt="${data.image.alt}">
-                                <div style='width: 500px;'>
-                                <h3>${Object.values(data.attributes)[0]}</h3>
-                                    <h4>${data.price_html}</h4>
-                                    <button class="btn btn-outline-primary" onclick="addVariationsToCart('${id}', '${data.variation_id}', 'pump')">เพิ่มลงในตะกร้า</botton>
-                                </div>
-                            </div>
-                            `;
-                        });
-                    }
-                    if(type == "filter") {
-                        document.getElementById('recommended_pool_filter_list').classList.remove('full');
-                        filterVariations.classList.add('active');
-                        filterVariations.innerHTML = "";
-                        result.data.forEach(data => {                            
-                            filterVariations.innerHTML += `
-                            <div style="display: flex;">
-                                <img src="${data.image.full_src}" width="150" alt="${data.image.alt}">
-                                <div style='width: 500px;'>
-                                <h3>${Object.values(data.attributes)[0]}</h3>
-                                    <h4>${data.price_html}</h4>
-                                    <button class="btn btn-outline-primary" onclick="addVariationsToCart('${id}', '${data.variation_id}', 'filter')">เพิ่มลงในตะกร้า</botton>
-                                </div>
-                            </div>
-                            `;
-                        });
-                    }
-                    if(type == "robot") {
-                        document.getElementById('recommended_pool_robot_list').classList.remove('full');
-                        robotVariations.classList.add('active');
-                        robotVariations.innerHTML = "";
-                        result.data.forEach(data => {                            
-                            robotVariations.innerHTML += `
-                            <div style="display: flex;">
-                                <img src="${data.image.full_src}" width="150" alt="${data.image.alt}">
-                                <div style='width: 500px;'>
-                                <h3>${Object.values(data.attributes)[0]}</h3>
-                                    <h4>${data.price_html}</h4>
-                                    <button class="btn btn-outline-primary" onclick="addVariationsToCart('${id}', '${data.variation_id}', 'robot')">เพิ่มลงในตะกร้า</botton>
-                                </div>
-                            </div>
-                            `;
-                        });
-                    }
-                } else {
-                    if(result.data == "Product is not variable.") {
-                        addVariationsToCart(id, 0, type)
-                        toggleProductRecommendation(type);
-                        return;
-                    }
-                    console.error('Error from server:', result.data);
-                }
-            })
-            .catch(error => {
-                console.error('Fetch error:', error);
-            });
-        }
-
-        function addVariationsToCart(product_id, variation_id, type) {
+        async function addToCart(product_id, variation_id, type, spec) {
             const params = new URLSearchParams();
             params.append('action', 'custom_add_to_cart'); // เรียก Action ที่เราสร้างใน PHP
             params.append('product_id', product_id);         // ส่ง ID สินค้าหลัก
@@ -919,9 +924,8 @@ function match_your_pool_page() {
                 if (!response.ok) throw new Error('Network error');
                 return response.json();
             })
-            .then(result => {
+            .then(async result => {
                 if (result) {
-                    toggleProductRecommendation(type);
                     document.getElementById('pool_'+type+'_status').innerHTMl = "✅";
 
                     jQuery(document.body).trigger('added_to_cart', [result.fragments, null, null]);
@@ -947,12 +951,12 @@ function match_your_pool_page() {
             const collapse_pool_robot_cleaner_list = document.getElementById('collapse_pool_robot_cleaner_list')
 
             if(type == "pump") {
-                collapse_pool_pump_list.classList.remove('show');
+                // collapse_pool_pump_list.classList.remove('show');
                 collapse_pool_filter_list.classList.add('show');
             }
 
             if(type == "filter") {
-                collapse_pool_filter_list.classList.remove('show');
+                // collapse_pool_filter_list.classList.remove('show');
                 collapse_pool_robot_cleaner_list.classList.add('show');
             }
 
@@ -983,13 +987,196 @@ function match_your_pool_page() {
             }
         }
 
+        async function addToVirtualCart(title, product_id, variation_id, type, spec, price) {
+            if(type == "pump") {
+                if(pumpSelected == true) {
+                    virtual_cart = []
+                }
+
+                virtual_cart.push({
+                    title: title,
+                    parent_id: product_id,
+                    variation_id: variation_id,
+                    type: type,
+                    spec: spec,
+                    price: price,
+                })
+
+                initVirtualCart();
+                toggleProductRecommendation(type);
+
+                pumpSelected = true;
+                document.getElementById('filterProducts').style.display = "block";
+                document.getElementById('current_pump_flowrate').innerHTML = "เหมาะสำหรับปั๊ม Flow Rate = "+spec+" m³/h"
+
+                const result = await fetchRecommendedProducts(spec, 0, 0, 'onlyFilter');
+                if ( result && result.success && result.data ) {
+                    renderProductList('recommended_pool_filter_list', result.data.filter, 'filter');
+                } else {
+                    renderProductList('recommended_pool_filter_list', []);
+                }
+            }
+
+            if(type == "filter" && pumpSelected) {
+                if(filterSelected) {
+                    virtual_cart.pop();
+                }
+
+                virtual_cart.push({
+                    title: title,
+                    parent_id: product_id,
+                    variation_id: variation_id,
+                    type: type,
+                    spec: spec,
+                    price: price,
+                })
+                
+                initVirtualCart();
+
+                filterSelected = true;
+            }
+        }
+
+        function initVirtualCart() {
+            document.getElementById("virtualCartTable").innerHTML = "";
+            sum = 0
+
+            for(i = 0; i < virtual_cart.length; i++) {
+                document.getElementById("virtualCartTable").innerHTML += `
+                <tr>
+                    <td>${virtual_cart[i].title}</td>
+                    <td>${virtual_cart[i].type}</td>
+                    <td>${virtual_cart[i].spec} m³/h</td>
+                    <td>${parseInt(virtual_cart[i].price).toLocaleString()} บาท</td>
+                    <td><button class="btn" onclick="removeFromVirtualCart('${virtual_cart[i].title}')">🗑️</td>
+                </tr>
+                `;
+                sum += parseInt(virtual_cart[i].price);
+            }
+
+            document.getElementById('virtualCartSummery').innerHTML = `🛒 รวมทั้งสิ้น <b>${sum.toLocaleString()}</b> บาท`;
+        }
+
+        function removeFromVirtualCart(title) {
+            let updatedCart = [];
+            
+            for (let i = 0; i < virtual_cart.length; i++) {
+                // Keep items that DO NOT match the title
+                if (virtual_cart[i].title != title) {
+                    updatedCart.push({
+                        title: virtual_cart[i].title,
+                        parent_id: virtual_cart[i].parent_id,
+                        variation_id: virtual_cart[i].variation_id,
+                        type: virtual_cart[i].type,
+                        spec: virtual_cart[i].spec,
+                        price: virtual_cart[i].price,
+                    });
+                }
+
+                if(virtual_cart[i].title == title) {
+                    if(virtual_cart[i].type == 'pump') {
+                        pumpSelected = false;
+                    }
+                    if(virtual_cart[i].type == 'filter') {
+                        filterSelected = false;
+                    }
+                }
+            }
+            
+            virtual_cart = updatedCart;
+            initVirtualCart();
+        }
+
+        async function addMultipleToCart() {
+            for (const item of virtual_cart) {
+                const params = new URLSearchParams();
+                params.append('action', 'custom_add_to_cart'); // สร้าง action สำหรับเพิ่มทีละชิ้น
+                params.append('parent_id', item.parent_id);
+                params.append('variation_id', item.variation_id);
+
+                try {
+                    const response = await fetch("/wp-admin/admin-ajax.php", {
+                        method: 'POST',
+                        body: params
+                    });
+                    const result = await response.json();
+                    jQuery(document.body).trigger('added_to_cart', [result.fragments, null, null]);
+                    const quickBadges = document.querySelectorAll('.mini-cart-count, .cart-contents, .count');
+                    quickBadges.forEach(badge => {
+                        if (badge && !badge.innerHTML.includes('฿')) {
+                            badge.innerText = result.cart_count;
+                        }
+                    });
+                } catch (error) {
+                    console.error('Error adding item:', error);
+                }
+            }
+            
+            // หลังจากวนลูปครบแล้วค่อยอัปเดต UI ครั้งเดียว
+            jQuery(document.body).trigger('wc_fragment_refresh');
+        }
+
         // เรียกคำนวณครั้งแรกเมื่อโหลดหน้า
         setTurnover(6);
         calculateVolume();
+
+        let page;
+
+        function menuNavigation(target) {
+            page = target;
+            initMenu();
+        }
+
+        function initMenu() {
+            if(page == "pool_match") {
+                document.getElementById('pool_match_link').classList.add('active')
+                document.getElementById('flow_match_link').classList.remove('active')
+                
+                document.getElementById('flow_match_page').style.display = "none";
+                document.getElementById('pool_match_page').style.display = "block";
+
+                if(pumpSelected == false) {
+                    document.getElementById('filterProducts').style.display = "none";
+                }
+            }
+
+            if(page == "flow_match") {
+                document.getElementById('filterProducts').style.display = "block";
+
+                document.getElementById('flow_match_link').classList.add('active')
+                document.getElementById('pool_match_link').classList.remove('active')
+            
+                document.getElementById('pool_match_page').style.display = "none";
+                document.getElementById('flow_match_page').style.display = "block";
+            }
+        }
+
+        menuNavigation("pool_match");
     </script>
-    <br><br>
 </div>
+<br><br>
 <?php
 }
 
 add_shortcode( 'match_your_pool_page', 'match_your_pool_page' );
+
+// Get Product and add to custom table
+
+// INSERT INTO wpln_myp_products (parent_id, variant_id, title)
+// SELECT DISTINCT 
+//     parent.ID AS parent_product_id,
+//     variation.ID AS variation_id,
+//     variation.post_title as variation_title
+// FROM 
+//     wpln_posts AS variation
+// INNER JOIN 
+//     wpln_posts AS parent ON variation.post_parent = parent.ID
+// WHERE 
+//     variation.post_type = 'product_variation'
+//     AND variation.post_status = 'publish'
+//     AND parent.post_type = 'product'
+//     AND parent.post_title NOT LIKE '%Parts%'
+//     AND parent.post_title NOT LIKE '%Multiport%'
+//     AND parent.post_title NOT LIKE '%valve%'
+//     AND parent.post_title NOT LIKE '%ไฟ%'
+//     AND parent.post_title NOT LIKE '%อะไหล่%';
