@@ -734,7 +734,7 @@ function match_your_pool_page() {
                 <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_cleartrine"></span></p>
             </div>
         </div>
-        <div class="recommended_chemicals_products">
+        <div class="recommended_chemicals_products result_card">
             <?php
             $slugs = [
                 'คลอรีน-90-ชนิดเม็ด-เกล็ด-chlorine-90',
