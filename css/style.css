@@ -106,6 +106,7 @@
     #recommended_pool_filter_list,
     #recommended_pool_robot_cleaner_list,
     #recommended_pool_pumpset_list,
+    #recommended_auto_pool_pumpset_list,
     #recommended_pool_chlorinator_list {
         width: 100%;
         max-height: 400px;
@@ -114,6 +115,22 @@
         cursor: grab;
         -ms-overflow-style: none;  /* Internet Explorer 10+ */
         scrollbar-width: none;
+    }
+
+    #recommended_auto_pool_pumpset_list {
+        padding: 15px;
+    }
+
+    .recommended_pair_item {
+        min-width: 400px;
+        padding: 25px;
+        margin: 0 10px;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.008), 0 0px 20px 0 rgba(0, 0, 0, 0.05);
+        border-radius: 20px;
+    }
+
+    .recommended_pair_item .recommended_meta,.recommended_title {
+        user-select: none;
     }
 
     .recommended_image img {
