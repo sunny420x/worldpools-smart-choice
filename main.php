@@ -1428,6 +1428,12 @@ function match_your_pool_page() {
             }
         }
 
+        function addPairToVirtualCart(pump, filter) {
+            addToVirtualCart(pump.title, pump.image, pump.parent_id, pump.variation_id, "pump", pump.spec, pump.esc_price);
+            addToVirtualCart(filter.title, filter.image, filter.parent_id, filter.variation_id, "filter", filter.spec, filter.esc_price);
+            initVirtualCart();
+        }
+
         function initVirtualCart() {
             let sum = 0
 
