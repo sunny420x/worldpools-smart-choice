@@ -131,7 +131,10 @@ function getAutoSelectPumpsetByFlowrate($minimum_flow_rate) {
     $pumps = getProductsByFlowRate('pump', $minimum_flow_rate);
     $filters = getProductsByFlowRate('filter', $minimum_flow_rate);
 
-    // 1. เรียงลำดับฟิลเตอร์จาก spec น้อยไปมาก เพื่อให้ได้ตัวที่ขนาดใกล้เคียงปั๊มที่สุดก่อน
+    usort($pumps, function($a, $b) {
+        return $a->spec <=> $b->spec;
+    });
+
     usort($filters, function($a, $b) {
         return $a->spec <=> $b->spec;
     });

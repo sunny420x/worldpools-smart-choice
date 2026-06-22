@@ -288,14 +288,14 @@
         background: transparent;
         border: 1.5px solid #4382DF;
         color: #4382DF;
+        outline: none;
     }
     button.btn-primary:hover{
         padding: 5px 10px;
-        border: 1.5px solid #4382DF !important;
-        border-color: transparent;
-        outline: none;
+        border: 1.5px solid #ffffff00;
+        border-color: #ffffff00 !important;
         color: #fff;
-        background: #4382DF;
+        background: linear-gradient(310deg, rgba(0, 91, 150, 1) 0%, rgba(0, 174, 239, 1) 100%, rgba(17, 24, 39, 1) 100%) !important;
     }
     button.btn-primary:before {
         padding: 8px 10px;
