@@ -1023,18 +1023,27 @@ function match_your_pool_page() {
         <div class="row" id="recommended_chemicals">
             <div class="col-lg result_card">
                 <h4>⚪ คลอรีน 90%</h4>
+                <h5 style="border-left: 2.5px solid #009FE3; padding: 10px; background: #f9f9f95c;">ช่วยฆ่าเชื้อและป้องกันตะไคร่</h5>
                 <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_chlorine"></span></p>
             </div>
             <div class="col-lg result_card">
-                <h4>🟢 Swimtrine กำจัดตะไคร่</h4>
+                <h4>🔵 Speed Flocc</h4>
+                <h5 style="border-left: 2.5px solid #009FE3; padding: 10px; background: #f9f9f95c;">ช่วยตกตะกอน</h5>
+                <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_speedflocc"></span></p>
+            </div>
+            <div class="col-lg result_card">
+                <h4>🟢 Swimtrine</h4>
+                <h5 style="border-left: 2.5px solid #009FE3; padding: 10px; background: #f9f9f95c;">ป้องกันตะไคร่เขียว</h5>
                 <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_swimtrine"></span></p>
             </div>
             <div class="col-lg result_card">
-                <h4>🔵 Cleartrine แก้น้ำขุ่น</h4>
+                <h4>🔵 Cleartrine</h4>
+                <h5 style="border-left: 2.5px solid #009FE3; padding: 10px; background: #f9f9f95c;">แก้ปัญหาน้ำขุ่น</h5>
                 <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_cleartrine"></span></p>
             </div>
             <div class="col-lg result_card">
-                <h4>⚫ Blacktrine กำจัดตะไคร่น้ำดำ</h4>
+                <h4>⚫ Blacktrine</h4>
+                <h5 style="border-left: 2.5px solid #009FE3; padding: 10px; background: #f9f9f95c;">กำจัดตะไคร่น้ำดำ</h5>
                 <p style="font-size: 18px; margin-top: 20px;"><span id="recommended_blacktrine"></span></p>
             </div>
         </div>
@@ -1042,10 +1051,10 @@ function match_your_pool_page() {
             <?php
             $slugs = [
                 'คลอรีน-90-ชนิดเม็ด-เกล็ด-chlorine-90',
+                'น้ำยาเร่งตกตะกอน-speed-flocc',
                 'น้ำยากำจัดตะไคร่น้ำ-swimtrine-plus',
                 'น้ำยาป้องกันน้ำขุ่น-cleartrine',
                 'black-algaetrine',
-                'liquid-shock-chlorine-ขนาด-1l'
             ];
 
             foreach ($slugs as $slug) {

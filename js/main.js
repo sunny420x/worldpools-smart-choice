@@ -285,6 +285,7 @@ async function calculateVolume() {
     document.getElementById('recommended_pool_robot_cleaner').innerText = `${floorArea.toFixed(0)} m² / ${length.toFixed(0)} m`;
 
     document.getElementById('recommended_chlorine').innerHTML = `<span class="colored">${(volume * 2).toFixed(1)} ถึง ${(volume * 3).toFixed(1)}</span> กรัม 2-3 ครั้งต่อสัปดาห์`;
+    document.getElementById('recommended_speedflocc').innerHTML = `<span class="colored">${(10 * volume).toFixed(1)} mL</span> เพื่อช่วยตกตะกอน`;
     document.getElementById('recommended_swimtrine').innerHTML = `<span class="colored">${((60 / 19) * volume).toFixed(1)} mL</span> ในช่วงแรก ทุก ๆ 7 วัน<br>
     <span class="colored">${((30 / 19) * volume).toFixed(1)} mL</span> เพื่อป้องกัน ทุก ๆ 10 - 14 วัน 
     `;
